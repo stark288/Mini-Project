@@ -1,0 +1,175 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClient.h>
+#include <ESP8266WebServer.h>
+#include <PZEM004Tv30.h>
+#include "FirebaseESP8266.h"
+#include "addons/TokenHelper.h"
+#include "addons/RTDBHelper.h"
+
+#define RELAY1 D2
+
+PZEM004Tv30 pzem(D3, D4); // RX/TX0
+
+const char* ssid = "OPPO Reno8 T 5G"; // Replace with your network SSID
+const char* password = "Oppo8T5g"; // Replace with your network password
+
+float current = 0.0;
+float power = 0.0;
+float voltage = 0.0;
+float pf = 0.0;
+int frequency = 0;
+int prepaidBalance = 0;
+int rechargeAmount = 0;
+float energyConsumption = 0.0;
+float totalEnergyConsumed = 0.0; // Total energy consumed (past + present)
+float totalenergy = 0.0;
+#define API_KEY "AIzaSyApIrxsSaL0aD2jHa31bwdMKiXeDgk7oNY" // Replace with your Firebase API key
+#define DATABASE_URL "pzem004t-4138d-default-rtdb.firebaseio.com/" // Replace with your Firebase database URL
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+bool signupOK = false;
+
+ESP8266WebServer server(80);
+String page = "";
+
+bool isRelayOn = false;
+
+void setup() {
+  pinMode(RELAY1, OUTPUT);
+  Serial.begin(115200);
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println(WiFi.localIP());
+
+  server.on("/", []() {
+    if (server.hasArg("amount")) {
+      rechargeAmount = server.arg("amount").toInt();
+      if (rechargeAmount > 0) {
+        prepaidBalance += rechargeAmount;
+        totalEnergyConsumed = 0.0; // Reset total energy consumed after recharge
+        if (!isRelayOn) {
+          digitalWrite(RELAY1, HIGH);
+          isRelayOn = true;
+          Serial.println("Relay turned on. Lamp is now lit.");
+        }
+        Serial.println("Meter recharged. Prepaid balance: " + String(prepaidBalance) + " units.");
+      }
+    }
+
+    // Calculate total energy consumed (past + present)
+    totalEnergyConsumed += energyConsumption;
+    totalenergy = rechargeAmount*0.016;
+
+    // Update the balance column with the current prepaid balance
+    String balanceColumn = "<td>Balance</td><td>" + String(prepaidBalance) + "</td><td>RS</td></tr>";
+
+    // Generate the HTML page with updated balance column and total energy consumed
+    page = "<html><head><title>Smart Energy Meter using IoT</title></head><style type=\"text/css\">";
+    page += "table{border-collapse: collapse;}th {background-color:  green ;color: white;}table,td {border: 4px solid black;font-size: x-large;";
+    page += "text-align:center;border-style: groove;border-color: rgb(255,0,0);}</style><body><center>";
+    page += "<h1>Smart Energy Meter using IoT</h1><br><br><table style=\"width: 1200px;height: 450px;\"><tr>";
+    page += "<th>Parameters</th><th>Value</th><th>Units</th></tr><tr><td>VOLTAGE</td><td>" + String(voltage) + "</td><td>Volts</td></tr>";
+    page += "<tr><td>CURRENT</td><td>" + String(current) + "</td><td>Amperes</td></tr><tr><td>Power Factor</td><td>" + String(pf) + "</td><td>XXXX</td>";
+    page += "<tr><td>POWER</td><td>" + String(power) + "</td><td>Watts</td></tr><tr>";
+    page += "<tr><td>FREQUENCY</td><td>" + String(frequency) + "</td><td>HZ</td></tr><tr>";
+    page += "<tr><td>Balance</td><td>" + String(prepaidBalance) + "</td><td>RS</td></tr>";
+    page += "<tr><td>Energy Consumed</td><td>" + String(energyConsumption) + "</td><td>KW</td></tr>";
+    page += "<tr><td>Total Energy Consumed</td><td>" + String(totalEnergyConsumed) + "</td><td>KW</td></tr>";
+    page += "<html><head><title>Recharge</title></head><body><form action='/' method='post'><label for='amount'>Enter amount :</label><input type='text' id='amount' name='amount'><input type='submit' value='Recharge'></form></body></html>";
+    page += "<tr><td>Total energy</td><td>" + String(totalenergy) + "</td><td>KW</td></tr>";
+    page += "<meta http-equiv=\"refresh\" content=\"4\">";
+    server.send(200, "text/html", page);
+  });
+
+  server.on("/", HTTP_POST, []() {
+    if (server.hasArg("amount")) {
+      rechargeAmount = server.arg("amount").toInt();
+      if (rechargeAmount > 0) {
+        prepaidBalance += rechargeAmount;
+        totalEnergyConsumed = 0.0; // Reset total energy consumed after recharge
+        if (!isRelayOn) {
+          digitalWrite(RELAY1, HIGH);
+          isRelayOn = true;
+          Serial.println("Relay turned on. Lamp is now lit.");
+        }
+        Serial.println("Meter recharged. Prepaid balance: " + String(prepaidBalance) + " units.");
+      }
+    }
+    server.send(200, "text/plain", "Recharge completed.");
+  });
+
+  server.onNotFound(handleNotFound);
+
+  server.begin();
+
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Firebase authentication succeeded.");
+    signupOK = true;
+  } else {
+    Serial.println("Firebase authentication failed.");
+  }
+
+  config.token_status_callback = tokenStatusCallback; // See addons/TokenHelper.h
+
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+}
+
+void loop() {
+  server.handleClient();
+
+  energyConsumption = (power / 1000) * 1;
+  prepaidBalance -= energyConsumption;
+
+  if (prepaidBalance <= 0 && isRelayOn) {
+    digitalWrite(RELAY1, LOW);
+    isRelayOn = false;
+    Serial.println("Relay turned off. Lamp is now off.");
+    totalEnergyConsumed += energyConsumption; // Add the final energy consumption to the total
+    Serial.println("Total Energy Consumed: " + String(totalEnergyConsumed) + " RS");
+  } else if (prepaidBalance > 0 && !isRelayOn) {
+    digitalWrite(RELAY1, HIGH);
+    isRelayOn = true;
+    Serial.println("Relay turned on. Lamp is now lit.");
+  }
+
+  voltage = pzem.voltage();
+  current = pzem.current();
+  power = pzem.power();
+  frequency = pzem.frequency();
+  pf = pzem.pf();
+
+  if (Firebase.ready() && signupOK) {
+    updateFirebaseValue("pzem004t/voltage", voltage);
+    updateFirebaseValue("pzem004t/current", current);
+    updateFirebaseValue("pzem004t/power", power);
+    updateFirebaseValue("pzem004t/frequency", frequency);
+    updateFirebaseValue("pzem004t/powerFactor", pf);
+    updateFirebaseValue("pzem004t/balance", prepaidBalance);
+    updateFirebaseValue("pzem004t/energyConsumed", energyConsumption);
+    updateFirebaseValue("pzem004t/totalEnergyConsumed", totalEnergyConsumed);
+    updateFirebaseValue("pzem004t/totalEnergy", totalenergy);
+  }
+}
+
+void handleNotFound() {
+  server.send(404, "text/plain", "Not found");
+}
+
+void updateFirebaseValue(const String& path, float value) {
+  if (Firebase.RTDB.setFloat(&fbdo, path.c_str(), value)) {
+    Serial.print(path + ": ");
+    Serial.println(value);
+  } else {
+    Serial.println("Failed to update " + path);
+  }
+}
